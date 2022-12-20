@@ -69,6 +69,7 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             owner,
             oracle,
             collector,
+            collateral_oracle,
             melange_factory,
             lock,
             token_code_id,
@@ -80,6 +81,7 @@ pub fn execute(deps: DepsMut, env: Env, info: MessageInfo, msg: ExecuteMsg) -> S
             owner,
             oracle,
             collector,
+            collateral_oracle,
             melange_factory,
             lock,
             token_code_id,
@@ -165,6 +167,7 @@ pub fn update_config(
     owner: Option<String>,
     oracle: Option<String>,
     collector: Option<String>,
+    collector_oracle: Option<String>,
     melange_factory: Option<String>,
     lock: Option<String>,
     token_code_id: Option<u64>,
@@ -187,6 +190,10 @@ pub fn update_config(
 
     if let Some(collector) = collector {
         config.collector = deps.api.addr_canonicalize(&collector)?;
+    }
+
+    if let Some(collateral_oracle) = collector_oracle {
+        config.collateral_oracle = deps.api.addr_canonicalize(&collateral_oracle)?;
     }
 
     if let Some(melange_factory) = melange_factory {
@@ -212,4 +219,47 @@ pub fn update_config(
 
     store_config(deps.storage, &config)?;
     Ok(Response::new().add_attribute("action", "update_config"))
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+    match msg {
+        QueryMsg::Config {} => to_binary(&query_config(deps)?),
+        QueryMsg::AssetConfig { asset_token } => to_binary(&query_asset_config(deps, asset_token)?),
+        QueryMsg::Position { position_idx } => to_binary(&query_position(deps, position_idx)?),
+        QueryMsg::Positions {
+            owner_addr,
+            asset_token,
+            start_after,
+            limit,
+            order_by,
+        } => to_binary(&query_positions(
+            deps,
+            owner_addr,
+            asset_token,
+            start_after,
+            limit,
+            order_by,
+        )?),
+        QueryMsg::NextPositionIdx {} => to_binary(&query_next_position_idx(deps)?),
+    }
+}
+
+pub fn query_asset_config(deps: Deps, asset_token: String) -> StdResult<AssetConfigResponse> {
+    let asset_config: AssetConfig = read_asset_config(
+        deps.storage,
+        &deps.api.addr_canonicalize(asset_token.as_str())?,
+    )?;
+
+    let resp = AssetConfigResponse {
+        token: deps
+            .api
+            .addr_humanize(&asset_config.token)
+            .unwrap()
+            .to_string(),
+        min_collateral_ratio: asset_config.min_collateral_ratio,
+        end_price: asset_config.end_price,
+    };
+
+    Ok(resp)
 }

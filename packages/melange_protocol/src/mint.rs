@@ -26,6 +26,7 @@ pub enum ExecuteMsg {
         owner: Option<String>,
         oracle: Option<String>,
         collector: Option<String>,
+        collateral_oracle: Option<String>,
         melange_factory: Option<String>,
         lock: Option<String>,
         token_code_id: Option<u64>,
@@ -46,6 +47,9 @@ pub enum ExecuteMsg {
         asset_token: String,
         end_price: Decimal,
     },
+    //////////////////////
+    /// User Operations
+    //////////////////////
     /// Create position to meet collateral ratio
     OpenPosition {
         collateral: Asset,
@@ -95,6 +99,14 @@ pub enum QueryMsg {
     Position {
         position_idx: Uint128,
     },
+    Positions {
+        owner_addr: Option<String>,
+        asset_token: Option<String>,
+        start_after: Option<Uint128>,
+        limit: Option<u32>,
+        order_by: Option<OrderBy>,
+    },
+    NextPositionIdx {},
 }
 
 // We define a custom struct for each query response

@@ -123,3 +123,71 @@ pub fn store_position(
     position_bucket.save(&idx.u128().to_be_bytes(), position)?;
     Ok(())
 }
+
+/// read position from store with position idx
+pub fn read_position(storage: &dyn Storage, idx: Uint128) -> StdResult<Position> {
+    let position_bucket: ReadonlyBucket<Position> = ReadonlyBucket::new(storage, PREFIX_POSITION);
+    position_bucket.load(&idx.u128().to_be_bytes())
+}
+
+// settings for pagination
+const MAX_LIMIT: u32 = 30;
+const DEFAULT_LIMIT: u32 = 10;
+pub fn read_positions(
+    storage: &dyn Storage,
+    start_after: Option<Uint128>,
+    limit: Option<u32>,
+    order_by: Option<OrderBy>,
+) -> StdResult<Vec<Position>> {
+    let position_bucket: ReadonlyBucket<Position> = ReadonlyBucket::new(storage, PREFIX_POSITION);
+
+    let limit = limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT) as usize;
+    let (start, end, order_by) = match order_by {
+        Some(OrderBy::Asc) => (calc_range_start(start_after), None, OrderBy::Asc),
+        _ => (None, calc_range_end(start_after), OrderBy::Desc),
+    };
+
+    position_bucket
+        .range(start.as_deref(), end.as_deref(), order_by.into())
+        .take(limit)
+        .map(|item| {
+            let (_, v) = item?;
+            Ok(v)
+        })
+        .collect()
+}
+
+// this will set the first key after the provided key, by appending a 1 byte
+fn calc_range_start(start_after: Option<Uint128>) -> Option<Vec<u8>> {
+    start_after.map(|idx| {
+        let mut v = idx.u128().to_be_bytes().to_vec();
+        v.push(1);
+        v
+    })
+}
+
+// this will set the first key after the provided key, by appending a 1 byte
+fn calc_range_end(start_after: Option<Uint128>) -> Option<Vec<u8>> {
+    start_after.map(|idx| idx.u128().to_be_bytes().to_vec())
+}
+
+/// remove position with idx
+pub fn remove_position(storage: &mut dyn Storage, idx: Uint128) -> StdResult<()> {
+    let position: Position = read_position(storage, idx)?;
+    let mut position_bucket: Bucket<Position> = Bucket::new(storage, PREFIX_POSITION);
+    position_bucket.remove(&idx.u128().to_be_bytes());
+
+    // remove indexer
+    let mut position_indexer_by_user: Bucket<bool> =
+        Bucket::multilevel(storage, &[PREFIX_INDEX_BY_USER, position.owner.as_slice()]);
+    position_indexer_by_user.remove(&idx.u128().to_be_bytes());
+
+    // remove indexer
+    let mut position_indexer_by_asset: Bucket<bool> = Bucket::multilevel(
+        storage,
+        &[PREFIX_INDEX_BY_ASSET, position.asset.info.as_bytes()],
+    );
+    position_indexer_by_asset.remove(&idx.u128().to_be_bytes());
+
+    Ok(())
+}

@@ -11,6 +11,7 @@ use melange_protocol::collateral_oracle::{
     CollateralInfoResponse, CollateralPriceResponse, QueryMsg as CollateralOracleQueryMsg,
 };
 use melange_protocol::asset::AssetInfoRaw;
+use sei_cosmwasm::PriceResponse;
 
 const PRICE_EXPIRE_TIME: u64 = 60;
 
@@ -111,4 +112,40 @@ pub fn load_asset_price(
     Ok(price)
 }
 
-// todo: query_price will be added
+// fixme: check PriceRespone from sei if it works correct
+pub fn query_price(
+    querier: &QuerierWrapper,
+    oracle: Addr,
+    base_asset: String,
+    quote_asset: Option<String>,
+    check_expire: bool,
+) -> StdResult<Decimal> {
+    let timeframe: Option<u64> = if check_expire {
+        Some(PRICE_EXPIRE_TIME)
+    } else {
+        None
+    };
+    let base_res: PriceResponse = querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: oracle.to_string(),
+        msg: to_binary(&OracleQueryMsg::Price {
+            asset_token: base_asset,
+            timeframe,
+        })?,
+    }))?;
+
+    let rate = if let Some(quote_asset) = quote_asset {
+        let quote_res: PriceResponse = querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+            contract_addr: oracle.to_string(),
+            msg: to_binary(&OracleQueryMsg::Price {
+                asset_token: quote_asset,
+                timeframe,
+            })?,
+        }))?;
+
+        decimal_division(base_res.rate, quote_res.rate)
+    } else {
+        base_res.rate
+    };
+
+    Ok(rate)
+}

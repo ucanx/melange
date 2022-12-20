@@ -348,3 +348,180 @@ pub fn mint(
         .add_messages(messages))
 }
 
+pub fn query_position(deps: Deps, position_idx: Uint128) -> StdResult<PositionResponse> {
+    let position: Position = read_position(deps.storage, position_idx)?;
+    let resp = PositionResponse {
+        idx: position.idx,
+        owner: deps.api.addr_humanize(&position.owner)?.to_string(),
+        collateral: position.collateral.to_normal(deps.api)?,
+        asset: position.asset.to_normal(deps.api)?,
+    };
+
+    Ok(resp)
+}
+
+pub fn burn(
+    deps: DepsMut,
+    env: Env,
+    sender: Addr,
+    position_idx: Uint128,
+    asset: Asset,
+) -> StdResult<Response> {
+    let burn_amount = asset.amount;
+    let config: Config = read_config(deps.storage)?;
+    let mut position: Position = read_position(deps.storage, position_idx)?;
+    let position_owner = deps.api.addr_humanize(&position.owner)?;
+    let collateral_info: AssetInfo = position.collateral.info.to_normal(deps.api)?;
+
+    // Check the asset has same token with position asset
+    // also Check burn amount is non-zero
+    assert_asset(deps.as_ref(), &position, &asset)?;
+
+    let asset_token_raw = match position.asset.info.clone() {
+        AssetInfoRaw::Token { contract_addr } => contract_addr,
+        _ => panic!("DO NOT ENTER HERE"),
+    };
+
+    let asset_config: AssetConfig = read_asset_config(deps.storage, &asset_token_raw)?;
+    if position.asset.amount < burn_amount {
+        return Err(StdError::generic_err(
+            "Cannot burn asset more than you mint",
+        ));
+    }
+
+    let mut messages: Vec<CosmosMsg> = vec![];
+    let mut attributes: Vec<Attribute> = vec![];
+
+    // fetch collateral info from collateral oracle
+    let collateral_oracle: Addr = deps.api.addr_humanize(&config.collateral_oracle)?;
+    let (collateral_price, _collateral_multiplier, _collateral_is_revoked) = load_collateral_info(
+        deps.as_ref(),
+        collateral_oracle,
+        &position.collateral.info,
+        true,
+    )?;
+
+    // If the collateral is default denom asset and the asset is deprecated,
+    // anyone can execute burn the asset to any position without permission
+    let mut close_position: bool = false;
+
+    if let Some(end_price) = asset_config.end_price {
+        let asset_price: Decimal = end_price;
+
+        let collateral_price_in_asset = decimal_division(asset_price, collateral_price);
+
+        // Burn deprecated asset to receive collaterals back
+        let conversion_rate =
+            Decimal::from_ratio(position.collateral.amount, position.asset.amount);
+        let mut refund_collateral = Asset {
+            info: collateral_info.clone(),
+            amount: std::cmp::min(
+                burn_amount * collateral_price_in_asset,
+                burn_amount * conversion_rate,
+            ),
+        };
+
+        position.asset.amount = position.asset.amount.checked_sub(burn_amount).unwrap();
+        position.collateral.amount = position
+            .collateral
+            .amount
+            .checked_sub(refund_collateral.amount)
+            .unwrap();
+
+        // due to rounding, include 1
+        if position.collateral.amount <= Uint128::from(1u128)
+            && position.asset.amount == Uint128::zero()
+        {
+            close_position = true;
+            remove_position(deps.storage, position_idx)?;
+        } else {
+            store_position(deps.storage, position_idx, &position)?;
+        }
+
+        // Subtract protocol fee from refunded collateral
+        let protocol_fee = Asset {
+            info: collateral_info,
+            amount: burn_amount * collateral_price_in_asset * config.protocol_fee_rate,
+        };
+
+        if !protocol_fee.amount.is_zero() {
+            messages.push(
+                protocol_fee
+                    .clone()
+                    .into_msg(&deps.querier, deps.api.addr_humanize(&config.collector)?)?,
+            );
+            refund_collateral.amount = refund_collateral
+                .amount
+                .checked_sub(protocol_fee.amount)
+                .unwrap();
+        }
+        attributes.push(attr("protocol_fee", protocol_fee.to_string()));
+
+        // Refund collateral msg
+        messages.push(refund_collateral.clone().into_msg(&deps.querier, sender)?);
+
+        attributes.push(attr(
+            "refund_collateral_amount",
+            refund_collateral.to_string(),
+        ));
+    } else {
+        if sender != position_owner {
+            return Err(StdError::generic_err("unauthorized"));
+        }
+        let oracle = deps.api.addr_humanize(&config.oracle)?;
+        let asset_price: Decimal =
+            load_asset_price(deps.as_ref(), oracle, &asset.info.to_raw(deps.api)?, true)?;
+        let collateral_price_in_asset: Decimal = decimal_division(asset_price, collateral_price);
+
+        // Subtract the protocol fee from the position's collateral
+        let protocol_fee = Asset {
+            info: collateral_info,
+            amount: burn_amount * collateral_price_in_asset * config.protocol_fee_rate,
+        };
+
+        if !protocol_fee.amount.is_zero() {
+            messages.push(
+                protocol_fee
+                    .clone()
+                    .into_msg(&deps.querier, deps.api.addr_humanize(&config.collector)?)?,
+            );
+            position.collateral.amount = position
+                .collateral
+                .amount
+                .checked_sub(protocol_fee.amount)?
+        }
+        attributes.push(attr("protocol_fee", protocol_fee.to_string()));
+
+        // Update asset amount
+        position.asset.amount = position.asset.amount.checked_sub(burn_amount).unwrap();
+        store_position(deps.storage, position_idx, &position)?;
+    }
+
+    let asset_token = deps.api.addr_humanize(&asset_config.token)?;
+
+    Ok(Response::new()
+        .add_messages(
+            vec![
+                vec![CosmosMsg::Wasm(WasmMsg::Execute {
+                    contract_addr: asset_token.to_string(),
+                    msg: to_binary(&Cw20ExecuteMsg::Burn {
+                        amount: burn_amount,
+                    })?,
+                    funds: vec![],
+                })],
+                messages,
+            ]
+                .concat(),
+        )
+        .add_attributes(
+            vec![
+                vec![
+                    attr("action", "burn"),
+                    attr("position_idx", position_idx.to_string()),
+                    attr("burn_amount", asset.to_string()),
+                ],
+                attributes,
+            ]
+                .concat(),
+        ))
+}
