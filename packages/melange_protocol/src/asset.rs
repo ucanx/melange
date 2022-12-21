@@ -1,13 +1,61 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::fmt;
-
-use crate::querier::{query_balance, query_token_balance};
 use cosmwasm_std::{
     to_binary, Addr, Api, BankMsg, CanonicalAddr, Coin, CosmosMsg, Decimal, MessageInfo,
-    QuerierWrapper, StdError, StdResult, SubMsg, Uint128, WasmMsg,
+    QuerierWrapper, StdError, StdResult, SubMsg, Uint128, WasmMsg, AllBalanceResponse,
+    BalanceResponse, BankQuery, QueryRequest, WasmQuery,
 };
 use cw20::Cw20ExecuteMsg;
+use cw20::{BalanceResponse as Cw20BalanceResponse, Cw20QueryMsg, TokenInfoResponse};
+
+pub fn query_balance(
+    querier: &QuerierWrapper,
+    account_addr: Addr,
+    denom: String,
+) -> StdResult<Uint128> {
+    // load price form the oracle
+    let balance: BalanceResponse = querier.query(&QueryRequest::Bank(BankQuery::Balance {
+        address: account_addr.to_string(),
+        denom,
+    }))?;
+    Ok(balance.amount.amount)
+}
+
+pub fn query_all_balances(querier: &QuerierWrapper, account_addr: Addr) -> StdResult<Vec<Coin>> {
+    // load price form the oracle
+    let all_balances: AllBalanceResponse =
+        querier.query(&QueryRequest::Bank(BankQuery::AllBalances {
+            address: account_addr.to_string(),
+        }))?;
+    Ok(all_balances.amount)
+}
+
+pub fn query_token_balance(
+    querier: &QuerierWrapper,
+    contract_addr: Addr,
+    account_addr: Addr,
+) -> StdResult<Uint128> {
+    let res: Cw20BalanceResponse = querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: contract_addr.to_string(),
+        msg: to_binary(&Cw20QueryMsg::Balance {
+            address: account_addr.to_string(),
+        })?,
+    }))?;
+
+    // load balance form the token contract
+    Ok(res.balance)
+}
+
+pub fn query_supply(querier: &QuerierWrapper, contract_addr: Addr) -> StdResult<Uint128> {
+    // load price form the oracle
+    let token_info: TokenInfoResponse = querier.query(&QueryRequest::Wasm(WasmQuery::Smart {
+        contract_addr: contract_addr.to_string(),
+        msg: to_binary(&Cw20QueryMsg::TokenInfo {})?,
+    }))?;
+
+    Ok(token_info.total_supply)
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Asset {
@@ -132,6 +180,62 @@ impl AssetInfoRaw {
                 match asset {
                     AssetInfoRaw::Token { .. } => false,
                     AssetInfoRaw::NativeToken { denom, .. } => self_denom == denom,
+                }
+            }
+        }
+    }
+}
+
+impl AssetInfo {
+    pub fn to_raw(&self, api: &dyn Api) -> StdResult<AssetInfoRaw> {
+        match self {
+            AssetInfo::NativeToken { denom } => Ok(AssetInfoRaw::NativeToken {
+                denom: denom.to_string(),
+            }),
+            AssetInfo::Token { contract_addr } => Ok(AssetInfoRaw::Token {
+                contract_addr: api.addr_canonicalize(contract_addr.as_str())?,
+            }),
+        }
+    }
+
+    pub fn is_native_token(&self) -> bool {
+        match self {
+            AssetInfo::NativeToken { .. } => true,
+            AssetInfo::Token { .. } => false,
+        }
+    }
+    pub fn query_pool(
+        &self,
+        querier: &QuerierWrapper,
+        api: &dyn Api,
+        pool_addr: Addr,
+    ) -> StdResult<Uint128> {
+        match self {
+            AssetInfo::Token { contract_addr, .. } => query_token_balance(
+                querier,
+                api.addr_validate(contract_addr.as_str())?,
+                pool_addr,
+            ),
+            AssetInfo::NativeToken { denom, .. } => {
+                query_balance(querier, pool_addr, denom.to_string())
+            }
+        }
+    }
+
+    pub fn equal(&self, asset: &AssetInfo) -> bool {
+        match self {
+            AssetInfo::Token { contract_addr, .. } => {
+                let self_contract_addr = contract_addr;
+                match asset {
+                    AssetInfo::Token { contract_addr, .. } => self_contract_addr == contract_addr,
+                    AssetInfo::NativeToken { .. } => false,
+                }
+            }
+            AssetInfo::NativeToken { denom, .. } => {
+                let self_denom = denom;
+                match asset {
+                    AssetInfo::Token { .. } => false,
+                    AssetInfo::NativeToken { denom, .. } => self_denom == denom,
                 }
             }
         }
